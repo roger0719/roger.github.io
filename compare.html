@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>compare_tool</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .hex-font { font-family: 'Courier New', Courier, monospace; }
+        .sync-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+        .sync-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .sync-scroll::-webkit-scrollbar-track { background: #f8fafc; }
+        
+        /* ================= 欄位對齊引擎 (Flexbox) ================= */
+        .row-wrapper { display: flex; width: max-content; min-width: 100%; }
+        .col-addr { width: 85px; flex-shrink: 0; color: #64748b; user-select: none; }
+        .col-hex { width: 480px; flex-shrink: 0; margin-right: 16px; white-space: pre; }
+        .col-ascii { flex-grow: 1; padding-left: 16px; border-left: 1px solid #334155; letter-spacing: 0.1em; user-select: none; white-space: pre; }
+        
+        /* ================= 差異高亮系統 ================= */
+        .diff-byte { cursor: pointer; transition: all 0.15s ease; padding: 0 2px; border-radius: 3px; }
+        
+        /* 模式 1：全部顯示 (Mode-All) */
+        .mode-all .diff-byte { background-color: rgba(249, 115, 22, 0.85); color: white; font-weight: bold; }
+        .mode-all .diff-byte:hover { background-color: rgb(234, 88, 12); box-shadow: 0 0 6px rgba(234, 88, 12, 0.6); }
+        .mode-all .diff-ascii { background-color: rgba(124, 45, 18, 0.6); color: #fb923c; font-weight: bold; }
+
+        /* 模式 2：單一專注 (Mode-Single) */
+        .mode-single .diff-byte { color: #fb923c; font-weight: bold; background-color: transparent; }
+        .mode-single .diff-byte:hover { background-color: rgba(249, 115, 22, 0.2); }
+        .mode-single .diff-ascii { color: #fb923c; }
+
+        /* 目前被選中 (Focused) 的元素樣式 */
+        .diff-focus { background-color: #ea580c !important; color: white !important; outline: 2px solid white; border-radius: 2px; box-shadow: 0 0 10px rgba(234,88,12,0.8); z-index: 10; position: relative; }
+        .diff-focus-ascii { background-color: #ea580c !important; color: white !important; border-radius: 2px; }
+        
+        /* 整行被選中 (Line Focus) 的背景提示 */
+        .line-focus { background-color: rgba(59, 130, 246, 0.2); outline: 1px dashed rgba(59, 130, 246, 0.5); border-radius: 4px; }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 h-screen flex flex-col antialiased">
+
+    <header class="bg-slate-950 border-b border-slate-800 p-3 flex justify-between items-center shadow-lg select-none shrink-0">
+        <div class="flex items-center gap-2">
+            <span class="text-xl">🔍</span>
+            <h1 class="text-base font-bold tracking-wide text-slate-200">compare_tool</h1>
+        </div>
+        <span id="statusText" class="text-xs font-mono bg-slate-800 text-slate-400 px-2 py-1 rounded">Status: Waiting for files...</span>
+    </header>
+
+    <div class="bg-slate-950/40 border-b border-slate-800 shadow-inner shrink-0 relative transition-all duration-300" id="topControlPanel">
+        
+        <div id="dragZoneContainer" class="p-4 grid grid-cols-2 gap-4">
+            <div id="dropZoneA" onclick="document.getElementById('fileA').click()" class="border-2 border-dashed border-slate-700 hover:border-blue-500 bg-slate-900/50 hover:bg-blue-950/20 p-5 rounded-xl flex flex-col items-center justify-center gap-1 cursor-pointer transition-all group relative">
+                <input type="file" id="fileA" accept=".bin,.hex" class="hidden">
+                <span class="text-2xl group-hover:scale-110 transition-transform pointer-events-none">📄</span>
+                <p id="labelA" class="text-sm font-semibold text-slate-300 group-hover:text-blue-400 text-center truncate w-full pointer-events-none">將 檔案 A 拖曳至此處</p>
+                <p class="text-[11px] text-slate-500 pointer-events-none">或點擊此區域選取檔案</p>
+            </div>
+            
+            <div id="dropZoneB" onclick="document.getElementById('fileB').click()" class="border-2 border-dashed border-slate-700 hover:border-emerald-500 bg-slate-900/50 hover:bg-emerald-950/20 p-5 rounded-xl flex flex-col items-center justify-center gap-1 cursor-pointer transition-all group relative">
+                <input type="file" id="fileB" accept=".bin,.hex" class="hidden">
+                <span class="text-2xl group-hover:scale-110 transition-transform pointer-events-none">📄</span>
+                <p id="labelB" class="text-sm font-semibold text-slate-300 group-hover:text-emerald-400 text-center truncate w-full pointer-events-none">將 檔案 B 拖曳至此處</p>
+                <p class="text-[11px] text-slate-500 pointer-events-none">快或點擊此區域選取檔案</p>
+            </div>
+        </div>
+
+        <div id="toolbarContainer" class="hidden p-3 flex justify-between items-center bg-slate-900/80">
+            <button onclick="resetApp()" class="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm px-4 py-1.5 rounded border border-slate-600 transition">
+                <span>🔄</span> 重新選取
+            </button>
+            
+            <div class="flex items-center gap-4">
+                <div class="flex items-center gap-2 bg-slate-950 px-2 py-1.5 rounded border border-slate-800">
+                    <span class="text-slate-400 text-xs font-bold tracking-wide">視覺模式:</span>
+                    <select id="selHighlightMode" onchange="updateViewSettings()" class="bg-slate-900 text-amber-400 font-semibold text-xs border-none outline-none cursor-pointer">
+                        <option value="all">全部高亮顯示</option>
+                        <option value="single">單一專注顯示</option>
+                    </select>
+                </div>
+
+                <div class="flex items-center gap-2 bg-slate-950 px-2 py-1.5 rounded border border-slate-800">
+                    <span class="text-slate-400 text-xs font-bold tracking-wide">跳轉單位:</span>
+                    <select id="selNavMode" onchange="updateViewSettings()" class="bg-slate-900 text-blue-400 font-semibold text-xs border-none outline-none cursor-pointer">
+                        <option value="byte">依 Byte 逐一</option>
+                        <option value="line">依 整行 (Line)</option>
+                    </select>
+                </div>
+                
+                <div class="flex items-center gap-3 bg-slate-950 px-4 py-1.5 rounded-full border border-slate-800 shadow-inner">
+                    <button onclick="navigateDiff(-1)" class="text-slate-400 hover:text-white px-2 rounded hover:bg-slate-800 transition font-bold" id="btnPrev">⬆️ 上一處</button>
+                    <span class="text-sm font-mono text-amber-400 font-bold min-w-[90px] text-center" id="diffCounterText">0 / 0</span>
+                    <button onclick="navigateDiff(1)" class="text-slate-400 hover:text-white px-2 rounded hover:bg-slate-800 transition font-bold" id="btnNext">下一處 ⬇️</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="px-4 py-2 bg-slate-950 border-b border-slate-800 text-xs text-slate-400 min-h-[36px] flex items-center gap-2 shrink-0" id="translateLabel">
+        <span class="text-amber-500 text-lg">💡</span> <span>操作提示：請載入兩個檔案。</span>
+    </div>
+
+    <div id="diffAppContainer" class="flex-1 flex overflow-hidden bg-slate-950 relative mode-all">
+        <div class="w-1/2 border-r border-slate-800 flex flex-col">
+            <div class="bg-slate-900/80 border-b border-slate-800 flex flex-col shrink-0">
+                <div class="px-4 py-1.5 text-[11px] font-bold text-slate-300 tracking-wider uppercase select-none">檔案 A 數據內容 (Base)</div>
+                <div class="px-4 py-1 text-[10px] font-bold text-slate-500 bg-slate-800/40 flex select-none tracking-widest row-wrapper overflow-hidden">
+                    <div class="col-addr">ADDRESS</div>
+                    <div class="col-hex">HEX DATA (16 BYTES)</div>
+                    <div class="col-ascii !border-l-transparent">ASCII</div>
+                </div>
+            </div>
+            <div id="paneA" class="flex-1 overflow-auto p-4 hex-font text-[13px] leading-[1.6] sync-scroll tracking-wide text-slate-300"></div>
+        </div>
+        
+        <div class="w-1/2 flex flex-col">
+            <div class="bg-slate-900/80 border-b border-slate-800 flex flex-col shrink-0">
+                <div class="px-4 py-1.5 text-[11px] font-bold text-slate-300 tracking-wider uppercase select-none">檔案 B 數據內容 (Target)</div>
+                <div class="px-4 py-1 text-[10px] font-bold text-slate-500 bg-slate-800/40 flex select-none tracking-widest row-wrapper overflow-hidden">
+                    <div class="col-addr">ADDRESS</div>
+                    <div class="col-hex">HEX DATA (16 BYTES)</div>
+                    <div class="col-ascii !border-l-transparent">ASCII</div>
+                </div>
+            </div>
+            <div id="paneB" class="flex-1 overflow-auto p-4 hex-font text-[13px] leading-[1.6] sync-scroll tracking-wide text-slate-300"></div>
+        </div>
+    </div>
+
+    <script>
+        let bufferA = null;
+        let bufferB = null;
+        
+        let diffBytes = []; 
+        let diffLines = []; 
+        let currentByteIdx = -1;
+        let currentLineIdx = -1;
+
+        // --- 拖曳區域設定 ---
+        setupDragAndDrop('dropZoneA', 'fileA', 'A');
+        setupDragAndDrop('dropZoneB', 'fileB', 'B');
+
+        function setupDragAndDrop(zoneId, inputId, type) {
+            const zone = document.getElementById(zoneId);
+            const input = document.getElementById(inputId);
+
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+                zone.addEventListener(eventName, preventDefaults, false);
+            });
+
+            function preventDefaults(e) { e.preventDefault(); e.stopPropagation(); }
+
+            ['dragenter', 'dragover'].forEach(eventName => {
+                zone.addEventListener(eventName, () => {
+                    zone.classList.add(type === 'A' ? 'border-blue-500' : 'border-emerald-500', type === 'A' ? 'bg-blue-950/20' : 'bg-emerald-950/20');
+                });
+            });
+
+            ['dragleave', 'drop'].forEach(eventName => {
+                zone.addEventListener(eventName, () => {
+                    zone.classList.remove('border-blue-500', 'border-emerald-500', 'bg-blue-950/20', 'bg-emerald-950/20');
+                });
+            });
+
+            input.addEventListener('change', (e) => {
+                if (e.target.files && e.target.files[0]) {
+                    handleFile(e.target.files[0], type);
+                }
+                e.target.value = ''; 
+            });
+
+            zone.addEventListener('drop', (e) => {
+                if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+                    handleFile(e.dataTransfer.files[0], type);
+                }
+            });
+        }
+
+        function handleFile(file, type) {
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                if (type === 'A') bufferA = new Uint8Array(e.target.result);
+                if (type === 'B') bufferB = new Uint8Array(e.target.result);
+                
+                document.getElementById(`label${type}`).innerHTML = `✅ 已載入: <span class="text-amber-400 font-mono truncate w-full inline-block align-bottom">${file.name}</span>`;
+                
+                if (bufferA && bufferB) {
+                    document.getElementById('statusText').innerText = "自動比對中...";
+                    document.getElementById('dragZoneContainer').classList.add('hidden');
+                    document.getElementById('toolbarContainer').classList.remove('hidden');
+                    setTimeout(() => { renderDiff(bufferA, bufferB); }, 50);
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        // 同步捲軸
+        const paneA = document.getElementById('paneA');
+        const paneB = document.getElementById('paneB');
+        paneA.addEventListener('scroll', () => { paneB.scrollTop = paneA.scrollTop; paneB.scrollLeft = paneA.scrollLeft; });
+        paneB.addEventListener('scroll', () => { paneA.scrollTop = paneB.scrollTop; paneA.scrollLeft = paneB.scrollLeft; });
+
+        function toChar(byte) { return (byte >= 32 && byte <= 126) ? String.fromCharCode(byte) : '.'; }
+        function toHex(byte) { return byte.toString(16).padStart(2, '0').toUpperCase(); }
+
+        // --- 核心渲染 ---
+        function renderDiff(bufA, bufB) {
+            const maxLength = Math.max(bufA.length, bufB.length);
+            let htmlA = ''; let htmlB = '';
+            const bytesPerLine = 16; 
+            
+            diffBytes = [];
+            diffLines = [];
+            currentByteIdx = -1;
+            currentLineIdx = -1;
+
+            for (let i = 0; i < maxLength; i += bytesPerLine) {
+                const addrHex = i.toString(16).padStart(8, '0').toUpperCase();
+                const addrStr = `<span class="col-addr">${addrHex}:</span>`;
+                
+                let lineHexA = ''; let lineAsciiA = '';
+                let lineHexB = ''; let lineAsciiB = '';
+                let hasDiffInLine = false;
+
+                for (let j = 0; j < bytesPerLine; j++) {
+                    const offset = i + j;
+                    if (offset >= maxLength) {
+                        const padding = '   '.repeat(bytesPerLine - j);
+                        lineHexA += padding; lineHexB += padding;
+                        break;
+                    }
+
+                    const valA = offset < bufA.length ? bufA[offset] : null;
+                    const valB = offset < bufB.length ? bufB[offset] : null;
+
+                    const hexA = valA !== null ? toHex(valA) : '  ';
+                    const hexB = valB !== null ? toHex(valB) : '  ';
+                    const charA = valA !== null ? toChar(valA) : ' ';
+                    const charB = valB !== null ? toChar(valB) : ' ';
+
+                    if (valA !== valB) {
+                        hasDiffInLine = true;
+                        diffBytes.push({ offset: offset, lineAddr: i, valA: valA, valB: valB });
+                        
+                        lineHexA += `<span id="byte-A-${offset}" class="diff-byte" onclick="focusAndTranslate(${offset})">${hexA}</span> `;
+                        lineHexB += `<span id="byte-B-${offset}" class="diff-byte" onclick="focusAndTranslate(${offset})">${hexB}</span> `;
+                        
+                        lineAsciiA += `<span id="ascii-A-${offset}" class="diff-ascii px-0.5 rounded">${charA}</span>`;
+                        lineAsciiB += `<span id="ascii-B-${offset}" class="diff-ascii px-0.5 rounded">${charB}</span>`;
+                    } else {
+                        lineHexA += `${hexA} `; 
+                        lineHexB += `${hexB} `;
+                        lineAsciiA += `<span class="text-slate-500">${charA}</span>`;
+                        lineAsciiB += `<span class="text-slate-500">${charB}</span>`;
+                    }
+                }
+
+                if (hasDiffInLine) { diffLines.push(i); }
+
+                const lineId = `line-${i}`;
+                htmlA += `<div id="A-${lineId}" class="transition-colors duration-200 hover:bg-slate-800/40 rounded row-wrapper">${addrStr}<span class="col-hex">${lineHexA}</span><span class="col-ascii">${lineAsciiA}</span></div>`;
+                htmlB += `<div id="B-${lineId}" class="transition-colors duration-200 hover:bg-slate-800/40 rounded row-wrapper">${addrStr}<span class="col-hex">${lineHexB}</span><span class="col-ascii">${lineAsciiB}</span></div>`;
+            }
+
+            paneA.innerHTML = htmlA;
+            paneB.innerHTML = htmlB;
+            
+            document.getElementById('statusText').innerText = "Compare completed!";
+            updateViewSettings(); 
+            
+            if (diffBytes.length > 0) {
+                navigateDiff(1); 
+            }
+        }
+
+        window.updateViewSettings = function() {
+            const hMode = document.getElementById('selHighlightMode').value;
+            const container = document.getElementById('diffAppContainer');
+            
+            container.classList.remove('mode-all', 'mode-single');
+            container.classList.add(`mode-${hMode}`);
+            
+            navigateDiff(0); 
+        };
+
+        window.focusAndTranslate = function(targetOffset) {
+            document.getElementById('selNavMode').value = 'byte'; 
+            currentByteIdx = diffBytes.findIndex(d => d.offset === targetOffset);
+            navigateDiff(0);
+        };
+
+        window.navigateDiff = function(direction) {
+            const navMode = document.getElementById('selNavMode').value;
+            
+            document.querySelectorAll('.diff-focus').forEach(el => el.classList.remove('diff-focus'));
+            document.querySelectorAll('.diff-focus-ascii').forEach(el => el.classList.remove('diff-focus-ascii'));
+            document.querySelectorAll('.line-focus').forEach(el => el.classList.remove('line-focus'));
+
+            if (navMode === 'byte') {
+                if (diffBytes.length === 0) { updateCounter(0, 0); return; }
+                
+                if (direction !== 0 || currentByteIdx === -1) {
+                    currentByteIdx += direction;
+                    if (currentByteIdx < 0) currentByteIdx = diffBytes.length - 1;
+                    if (currentByteIdx >= diffBytes.length) currentByteIdx = 0;
+                }
+                
+                const target = diffBytes[currentByteIdx];
+                const elA = document.getElementById(`byte-A-${target.offset}`);
+                const elB = document.getElementById(`byte-B-${target.offset}`);
+                const ascA = document.getElementById(`ascii-A-${target.offset}`);
+                const ascB = document.getElementById(`ascii-B-${target.offset}`);
+                
+                if (elA) {
+                    elA.classList.add('diff-focus'); elB.classList.add('diff-focus');
+                    if(ascA) { ascA.classList.add('diff-focus-ascii'); ascB.classList.add('diff-focus-ascii'); }
+                    
+                    elA.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    translateText(target.offset, target.valA, target.valB);
+                }
+                updateCounter(currentByteIdx + 1, diffBytes.length);
+                
+            } else if (navMode === 'line') {
+                if (diffLines.length === 0) { updateCounter(0, 0); return; }
+                
+                if (direction !== 0 || currentLineIdx === -1) {
+                    currentLineIdx += direction;
+                    if (currentLineIdx < 0) currentLineIdx = diffLines.length - 1;
+                    if (currentLineIdx >= diffLines.length) currentLineIdx = 0;
+                }
+                
+                const targetLineAddr = diffLines[currentLineIdx];
+                const lineA = document.getElementById(`A-line-${targetLineAddr}`);
+                const lineB = document.getElementById(`B-line-${targetLineAddr}`);
+                
+                if (lineA) {
+                    lineA.classList.add('line-focus');
+                    lineB.classList.add('line-focus');
+                    lineA.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    
+                    const firstByteInLine = diffBytes.find(d => d.lineAddr === targetLineAddr);
+                    if (firstByteInLine) {
+                        translateText(firstByteInLine.offset, firstByteInLine.valA, firstByteInLine.valB, true);
+                    }
+                }
+                updateCounter(currentLineIdx + 1, diffLines.length);
+            }
+        };
+
+        function updateCounter(current, total) {
+            document.getElementById('diffCounterText').innerText = `${current} / ${total}`;
+            const disabled = total === 0;
+            document.getElementById('btnPrev').disabled = disabled;
+            document.getElementById('btnNext').disabled = disabled;
+            if (disabled) {
+                document.getElementById('translateLabel').innerHTML = `<span class="text-green-500 text-lg">✅</span> <span>兩個檔案完全相同。</span>`;
+            }
+        }
+
+        function translateText(offset, valA, valB, isLineMode = false) {
+            const addrHex = offset.toString(16).toUpperCase().padStart(8, '0');
+            const hexA = (valA || 0).toString(16).padStart(2, '0').toUpperCase();
+            const hexB = (valB || 0).toString(16).padStart(2, '0').toUpperCase();
+            const binA = (valA || 0).toString(2).padStart(8, '0');
+            const binB = (valB || 0).toString(2).padStart(8, '0');
+            
+            const prefix = isLineMode ? `本行首個差異在位址 ` : `位址 `;
+            
+            document.getElementById('translateLabel').innerHTML = `
+                <span class="text-amber-500 text-lg">💡</span> 
+                <span>${prefix} <b class="tracking-wider">0x${addrHex}</b> ： Base 為 <b class="text-blue-400">0x${hexA}</b> <span class="text-slate-500">(${binA})</span> ➡️ Target 被修改為 <b class="text-emerald-400">0x${hexB}</b> <span class="text-slate-500">(${binB})</span></span>
+            `;
+        }
+
+        window.resetApp = function() {
+            bufferA = null; bufferB = null;
+            diffBytes = []; diffLines = [];
+            currentByteIdx = -1; currentLineIdx = -1;
+            
+            document.getElementById('fileA').value = '';
+            document.getElementById('fileB').value = '';
+            document.getElementById('labelA').innerText = '將 檔案 A 拖曳至此處';
+            document.getElementById('labelB').innerText = '將 檔案 B 拖曳至此處';
+            
+            document.getElementById('paneA').innerHTML = '';
+            document.getElementById('paneB').innerHTML = '';
+            document.getElementById('statusText').innerText = 'Status: Waiting for files...';
+            document.getElementById('translateLabel').innerHTML = `<span class="text-amber-500 text-lg">💡</span> <span>操作提示：請載入兩個檔案。</span>`;
+            
+            document.getElementById('toolbarContainer').classList.add('hidden');
+            document.getElementById('dragZoneContainer').classList.remove('hidden');
+        };
+    </script>
+</body>
+</html>
