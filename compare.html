@@ -1,0 +1,495 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>compare_tool (Virtual Scroll Optimized)</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .hex-font { font-family: 'Courier New', Courier, monospace; }
+        .sync-scroll::-webkit-scrollbar { width: 8px; height: 8px; }
+        .sync-scroll::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
+        .sync-scroll::-webkit-scrollbar-track { background: #f8fafc; }
+        
+        /* ================= 虛擬滾動核心樣式 ================= */
+        /* 嚴格鎖定行高，這是計算虛擬視窗的基礎 */
+        .row-wrapper { 
+            display: flex; width: max-content; min-width: 100%; 
+            height: 24px; line-height: 24px; box-sizing: border-box; 
+        }
+        .scroll-container { position: relative; overflow: auto; height: 100%; will-change: scroll-position; }
+        .virtual-space { position: absolute; top: 0; left: 0; width: 100%; pointer-events: none; }
+        .render-chunk { position: absolute; top: 0; left: 0; right: 0; width: max-content; min-width: 100%; }
+
+        /* ================= 欄位對齊引擎 ================= */
+        .col-addr { width: 85px; flex-shrink: 0; color: #64748b; user-select: none; }
+        .col-hex { width: 480px; flex-shrink: 0; margin-right: 16px; white-space: pre; }
+        .col-ascii { flex-grow: 1; padding-left: 16px; border-left: 1px solid #334155; letter-spacing: 0.1em; user-select: none; white-space: pre; }
+        
+        /* ================= 差異高亮系統 ================= */
+        .diff-byte { cursor: pointer; transition: background-color 0.15s ease; border-radius: 2px; }
+        .diff-ascii { border-radius: 2px; }
+        
+        .mode-all .diff-byte { background-color: rgba(249, 115, 22, 0.85); color: white; font-weight: bold; }
+        .mode-all .diff-byte:hover { background-color: rgb(234, 88, 12); box-shadow: 0 0 6px rgba(234, 88, 12, 0.6); }
+        .mode-all .diff-ascii { background-color: rgba(124, 45, 18, 0.6); color: #fb923c; font-weight: bold; }
+
+        .mode-single .diff-byte { color: #fb923c; font-weight: bold; background-color: transparent; }
+        .mode-single .diff-byte:hover { background-color: rgba(249, 115, 22, 0.2); }
+        .mode-single .diff-ascii { color: #fb923c; }
+
+        /* Focus 狀態直接寫入 HTML 內，不依賴 DOM 操作 */
+        .diff-focus { background-color: #ea580c !important; color: white !important; outline: 1px solid white; border-radius: 2px; box-shadow: 0 0 10px rgba(234,88,12,0.8); z-index: 10; position: relative; }
+        .diff-focus-ascii { background-color: #ea580c !important; color: white !important; }
+        .line-focus { background-color: rgba(59, 130, 246, 0.2); outline: 1px dashed rgba(59, 130, 246, 0.5); border-radius: 4px; }
+
+        /* ================= 全局導航圖 (Minimap) ================= */
+        .minimap-marker { position: absolute; background-color: #f97316; border-radius: 1px; transition: transform 0.1s; }
+        .minimap-marker:hover { transform: scaleX(1.3); background-color: #fb923c; z-index: 10; }
+        .marker-thin { width: 30%; left: 35%; opacity: 0.7; }
+        .marker-thick { width: 70%; left: 15%; opacity: 0.9; }
+        .marker-massive { width: 100%; left: 0%; box-shadow: 0 0 4px rgba(234,88,12,0.8); z-index: 5; }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-100 h-screen flex flex-col antialiased">
+
+    <header class="bg-slate-950 border-b border-slate-800 p-3 flex justify-between items-center shadow-lg select-none shrink-0">
+        <div class="flex items-center gap-2">
+            <span class="text-xl">⚡</span>
+            <h1 class="text-base font-bold tracking-wide text-slate-200">compare_tool <span class="text-xs text-blue-400 font-normal ml-2">Fast Virtual Engine</span></h1>
+        </div>
+        <span id="statusText" class="text-xs font-mono bg-slate-800 text-slate-400 px-2 py-1 rounded">Status: Waiting for files...</span>
+    </header>
+
+    <div class="bg-slate-950/40 border-b border-slate-800 shadow-inner shrink-0 relative transition-all duration-300" id="topControlPanel">
+        <div id="dragZoneContainer" class="p-4 grid grid-cols-2 gap-4">
+            <div id="dropZoneA" onclick="document.getElementById('fileA').click()" class="border-2 border-dashed border-slate-700 hover:border-blue-500 bg-slate-900/50 hover:bg-blue-950/20 p-5 rounded-xl flex flex-col items-center justify-center gap-1 cursor-pointer transition-all group relative">
+                <input type="file" id="fileA" accept=".bin,.hex" class="hidden">
+                <span class="text-2xl group-hover:scale-110 transition-transform pointer-events-none">📄</span>
+                <p id="labelA" class="text-sm font-semibold text-slate-300 group-hover:text-blue-400 text-center truncate w-full pointer-events-none">將 檔案 A 拖曳至此處</p>
+            </div>
+            
+            <div id="dropZoneB" onclick="document.getElementById('fileB').click()" class="border-2 border-dashed border-slate-700 hover:border-emerald-500 bg-slate-900/50 hover:bg-emerald-950/20 p-5 rounded-xl flex flex-col items-center justify-center gap-1 cursor-pointer transition-all group relative">
+                <input type="file" id="fileB" accept=".bin,.hex" class="hidden">
+                <span class="text-2xl group-hover:scale-110 transition-transform pointer-events-none">📄</span>
+                <p id="labelB" class="text-sm font-semibold text-slate-300 group-hover:text-emerald-400 text-center truncate w-full pointer-events-none">將 檔案 B 拖曳至此處</p>
+            </div>
+        </div>
+
+        <div id="toolbarContainer" class="hidden p-3 flex justify-between items-center bg-slate-900/80">
+            <button onclick="resetApp()" class="flex items-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-sm px-4 py-1.5 rounded border border-slate-600 transition">
+                <span>🔄</span> 重新選取
+            </button>
+            
+            <div class="flex items-center gap-4">
+                <div class="flex items-center gap-2 bg-slate-950 px-2 py-1.5 rounded border border-slate-800">
+                    <span class="text-slate-400 text-xs font-bold tracking-wide">視覺模式:</span>
+                    <select id="selHighlightMode" onchange="updateViewSettings()" class="bg-slate-900 text-amber-400 font-semibold text-xs border-none outline-none cursor-pointer">
+                        <option value="all">全部高亮顯示</option>
+                        <option value="single">單一專注顯示</option>
+                    </select>
+                </div>
+
+                <div class="flex items-center gap-2 bg-slate-950 px-2 py-1.5 rounded border border-slate-800">
+                    <span class="text-slate-400 text-xs font-bold tracking-wide">跳轉單位:</span>
+                    <select id="selNavMode" onchange="updateViewSettings()" class="bg-slate-900 text-blue-400 font-semibold text-xs border-none outline-none cursor-pointer">
+                        <option value="byte">依 Byte 逐一</option>
+                        <option value="line">依 整行 (Line)</option>
+                    </select>
+                </div>
+                
+                <div class="flex items-center gap-3 bg-slate-950 px-4 py-1.5 rounded-full border border-slate-800 shadow-inner">
+                    <button onclick="navigateDiff(-1)" class="text-slate-400 hover:text-white px-2 rounded hover:bg-slate-800 transition font-bold" id="btnPrev">⬆️ 上一處</button>
+                    <span class="text-sm font-mono text-amber-400 font-bold min-w-[90px] text-center" id="diffCounterText">0 / 0</span>
+                    <button onclick="navigateDiff(1)" class="text-slate-400 hover:text-white px-2 rounded hover:bg-slate-800 transition font-bold" id="btnNext">下一處 ⬇️</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="px-4 py-2 bg-slate-950 border-b border-slate-800 text-xs text-slate-400 min-h-[36px] flex items-center gap-2 shrink-0" id="translateLabel">
+        <span class="text-amber-500 text-lg">💡</span> <span>操作提示：請載入兩個檔案。中間的導航條可觀察全局差異並點擊跳轉。</span>
+    </div>
+
+    <div id="diffAppContainer" class="flex-1 flex overflow-hidden bg-slate-950 relative mode-all">
+        <div class="flex-1 border-r border-slate-800 flex flex-col min-w-0">
+            <div class="bg-slate-900/80 border-b border-slate-800 flex flex-col shrink-0 z-20">
+                <div class="px-4 py-1.5 text-[11px] font-bold text-slate-300 tracking-wider uppercase select-none">檔案 A 數據內容 (Base)</div>
+                <div class="px-4 py-1 text-[10px] font-bold text-slate-500 bg-slate-800/40 flex select-none tracking-widest overflow-hidden" style="width: max-content; min-width: 100%;">
+                    <div class="col-addr">ADDRESS</div>
+                    <div class="col-hex">HEX DATA (16 BYTES)</div>
+                    <div class="col-ascii !border-l-transparent">ASCII</div>
+                </div>
+            </div>
+            <div id="paneA" class="scroll-container hex-font text-[13px] tracking-wide text-slate-300 sync-scroll">
+                <div id="spaceA" class="virtual-space"></div>
+                <div id="chunkA" class="render-chunk p-4 pt-2"></div>
+            </div>
+        </div>
+        
+        <div id="minimapContainer" class="hidden w-8 bg-slate-900 border-r border-slate-800 relative cursor-pointer shrink-0 z-20" onclick="onMinimapClick(event)" title="點擊跳轉至該區域">
+            <div id="minimapContent" class="absolute inset-0"></div>
+            <div id="minimapViewport" class="absolute w-full bg-white/10 border-y border-white/30 pointer-events-none rounded-sm transition-opacity duration-150"></div>
+        </div>
+
+        <div class="flex-1 flex flex-col min-w-0">
+            <div class="bg-slate-900/80 border-b border-slate-800 flex flex-col shrink-0 z-20">
+                <div class="px-4 py-1.5 text-[11px] font-bold text-slate-300 tracking-wider uppercase select-none">檔案 B 數據內容 (Target)</div>
+                <div class="px-4 py-1 text-[10px] font-bold text-slate-500 bg-slate-800/40 flex select-none tracking-widest overflow-hidden" style="width: max-content; min-width: 100%;">
+                    <div class="col-addr">ADDRESS</div>
+                    <div class="col-hex">HEX DATA (16 BYTES)</div>
+                    <div class="col-ascii !border-l-transparent">ASCII</div>
+                </div>
+            </div>
+            <div id="paneB" class="scroll-container hex-font text-[13px] tracking-wide text-slate-300 sync-scroll">
+                <div id="spaceB" class="virtual-space"></div>
+                <div id="chunkB" class="render-chunk p-4 pt-2"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const ROW_HEIGHT = 24; 
+        const BYTES_PER_LINE = 16;
+        
+        let bufferA = null;
+        let bufferB = null;
+        
+        let fileMaxLength = 0;
+        let totalLinesCount = 0;
+        
+        // 資料比對結果陣列 (純資料，不包含 DOM)
+        let diffBytes = []; 
+        let diffLines = []; 
+        
+        // 紀錄目前 Focus 的目標 (供渲染引擎套用樣式)
+        let currentByteIdx = -1;
+        let currentLineIdx = -1;
+        let focusedByteOffset = -1;
+        let focusedLineAddr = -1;
+
+        // 拖曳與載入邏輯
+        setupDragAndDrop('dropZoneA', 'fileA', 'A');
+        setupDragAndDrop('dropZoneB', 'fileB', 'B');
+
+        function setupDragAndDrop(zoneId, inputId, type) {
+            const zone = document.getElementById(zoneId);
+            const input = document.getElementById(inputId);
+            ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(evt => zone.addEventListener(evt, e => { e.preventDefault(); e.stopPropagation(); }, false));
+            ['dragenter', 'dragover'].forEach(evt => zone.addEventListener(evt, () => zone.classList.add(type === 'A' ? 'border-blue-500' : 'border-emerald-500', type === 'A' ? 'bg-blue-950/20' : 'bg-emerald-950/20')));
+            ['dragleave', 'drop'].forEach(evt => zone.addEventListener(evt, () => zone.classList.remove('border-blue-500', 'border-emerald-500', 'bg-blue-950/20', 'bg-emerald-950/20')));
+            input.addEventListener('change', (e) => { if (e.target.files && e.target.files[0]) handleFile(e.target.files[0], type); e.target.value = ''; });
+            zone.addEventListener('drop', (e) => { if (e.dataTransfer.files && e.dataTransfer.files[0]) handleFile(e.dataTransfer.files[0], type); });
+        }
+
+        function handleFile(file, type) {
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                if (type === 'A') bufferA = new Uint8Array(e.target.result);
+                if (type === 'B') bufferB = new Uint8Array(e.target.result);
+                document.getElementById(`label${type}`).innerHTML = `✅ 已載入: <span class="text-amber-400 font-mono truncate w-full inline-block align-bottom">${file.name}</span>`;
+                
+                if (bufferA && bufferB) {
+                    document.getElementById('statusText').innerText = "高速資料分析中...";
+                    document.getElementById('dragZoneContainer').classList.add('hidden');
+                    document.getElementById('toolbarContainer').classList.remove('hidden');
+                    // 用 setTimeout 讓 UI 先更新，避免卡死
+                    setTimeout(() => { processDataDiff(); }, 50);
+                }
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        function toChar(byte) { return (byte >= 32 && byte <= 126) ? String.fromCharCode(byte) : '.'; }
+        function toHex(byte) { return byte.toString(16).padStart(2, '0').toUpperCase(); }
+
+        // ================= 核心分析引擎 (純運算，零 DOM 操作) =================
+        function processDataDiff() {
+            const maxLen = Math.max(bufferA.length, bufferB.length);
+            fileMaxLength = maxLen;
+            totalLinesCount = Math.ceil(maxLen / BYTES_PER_LINE);
+            
+            diffBytes = [];
+            diffLines = [];
+            let lastLineAddr = -1;
+
+            // 高速迴圈，僅掃描並紀錄差異點，瞬間即可完成數 MB 的分析
+            for (let i = 0; i < maxLen; i++) {
+                const valA = i < bufferA.length ? bufferA[i] : null;
+                const valB = i < bufferB.length ? bufferB[i] : null;
+
+                if (valA !== valB) {
+                    const lineAddr = Math.floor(i / BYTES_PER_LINE) * BYTES_PER_LINE;
+                    diffBytes.push({ offset: i, lineAddr: lineAddr, valA: valA, valB: valB });
+                    
+                    if (lastLineAddr !== lineAddr) {
+                        diffLines.push(lineAddr);
+                        lastLineAddr = lineAddr;
+                    }
+                }
+            }
+
+            // 設定虛擬空間高度，撐開原生卷軸
+            const totalHeight = totalLinesCount * ROW_HEIGHT;
+            document.getElementById('spaceA').style.height = `${totalHeight + 32}px`; // 32px為padding緩衝
+            document.getElementById('spaceB').style.height = `${totalHeight + 32}px`;
+
+            document.getElementById('statusText').innerText = "分析完成！";
+            document.getElementById('minimapContainer').classList.remove('hidden');
+            
+            renderMinimap();
+            updateViewSettings();
+            
+            if (diffBytes.length > 0) { navigateDiff(1); }
+            else { updateVirtualViewport(); } // 無差異時手動觸發初次渲染
+        }
+
+        // ================= 虛擬滾動渲染引擎 =================
+        const paneA = document.getElementById('paneA');
+        const paneB = document.getElementById('paneB');
+        const chunkA = document.getElementById('chunkA');
+        const chunkB = document.getElementById('chunkB');
+
+        let isSyncingLeft = false;
+        let isSyncingTop = false;
+
+        // 同步卷軸與觸發渲染
+        paneA.addEventListener('scroll', () => {
+            if (!isSyncingTop) { isSyncingTop = true; paneB.scrollTop = paneA.scrollTop; updateVirtualViewport(); isSyncingTop = false; }
+            if (!isSyncingLeft) { isSyncingLeft = true; paneB.scrollLeft = paneA.scrollLeft; isSyncingLeft = false; }
+            updateMinimapViewport();
+        });
+        paneB.addEventListener('scroll', () => {
+            if (!isSyncingTop) { isSyncingTop = true; paneA.scrollTop = paneB.scrollTop; updateVirtualViewport(); isSyncingTop = false; }
+            if (!isSyncingLeft) { isSyncingLeft = true; paneA.scrollLeft = paneB.scrollLeft; isSyncingLeft = false; }
+            updateMinimapViewport();
+        });
+
+        // 核心：只渲染畫面看得到的那幾行 (動態產出 DOM)
+        function updateVirtualViewport() {
+            if (totalLinesCount === 0) return;
+
+            const scrollTop = paneA.scrollTop;
+            const containerHeight = paneA.clientHeight;
+            
+            // 計算目前可視範圍的行數索引，並上下各多抓 5 行作為緩衝，避免滾動露白
+            const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - 5);
+            const visibleLines = Math.ceil(containerHeight / ROW_HEIGHT);
+            const endIndex = Math.min(totalLinesCount - 1, startIndex + visibleLines + 10);
+
+            let htmlA = '';
+            let htmlB = '';
+
+            for (let lineIdx = startIndex; lineIdx <= endIndex; lineIdx++) {
+                const i = lineIdx * BYTES_PER_LINE;
+                const addrHex = i.toString(16).padStart(8, '0').toUpperCase();
+                const addrStr = `<span class="col-addr">${addrHex}:</span>`;
+                
+                let lineHexA = '', lineAsciiA = '';
+                let lineHexB = '', lineAsciiB = '';
+                let hasDiffInLine = false;
+
+                const isLineFocused = (i === focusedLineAddr);
+                const focusClassStr = isLineFocused ? 'line-focus' : '';
+
+                for (let j = 0; j < BYTES_PER_LINE; j++) {
+                    const offset = i + j;
+                    if (offset >= fileMaxLength) {
+                        const padding = '   '.repeat(BYTES_PER_LINE - j);
+                        lineHexA += padding; lineHexB += padding;
+                        break;
+                    }
+
+                    const valA = offset < bufferA.length ? bufferA[offset] : null;
+                    const valB = offset < bufferB.length ? bufferB[offset] : null;
+                    
+                    const hexA = valA !== null ? toHex(valA) : '  ';
+                    const hexB = valB !== null ? toHex(valB) : '  ';
+                    const charA = valA !== null ? toChar(valA) : ' ';
+                    const charB = valB !== null ? toChar(valB) : ' ';
+
+                    if (valA !== valB) {
+                        hasDiffInLine = true;
+                        const isByteFocused = (offset === focusedByteOffset);
+                        const bClass = `diff-byte ${isByteFocused ? 'diff-focus' : ''}`;
+                        const aClass = `diff-ascii rounded ${isByteFocused ? 'diff-focus-ascii' : ''}`;
+                        
+                        lineHexA += `<span class="${bClass}" onclick="focusAndTranslate(${offset})">${hexA}</span> `;
+                        lineHexB += `<span class="${bClass}" onclick="focusAndTranslate(${offset})">${hexB}</span> `;
+                        lineAsciiA += `<span class="${aClass}">${charA}</span>`;
+                        lineAsciiB += `<span class="${aClass}">${charB}</span>`;
+                    } else {
+                        lineHexA += `${hexA} `; lineHexB += `${hexB} `;
+                        lineAsciiA += `<span class="text-slate-500">${charA}</span>`;
+                        lineAsciiB += `<span class="text-slate-500">${charB}</span>`;
+                    }
+                }
+
+                htmlA += `<div class="transition-colors duration-200 hover:bg-slate-800/40 rounded row-wrapper ${focusClassStr}">${addrStr}<span class="col-hex">${lineHexA}</span><span class="col-ascii">${lineAsciiA}</span></div>`;
+                htmlB += `<div class="transition-colors duration-200 hover:bg-slate-800/40 rounded row-wrapper ${focusClassStr}">${addrStr}<span class="col-hex">${lineHexB}</span><span class="col-ascii">${lineAsciiB}</span></div>`;
+            }
+
+            // 利用 transform: translateY 將渲染區塊移動到正確的位置
+            const topOffset = startIndex * ROW_HEIGHT;
+            chunkA.style.transform = `translateY(${topOffset}px)`;
+            chunkB.style.transform = `translateY(${topOffset}px)`;
+            chunkA.innerHTML = htmlA;
+            chunkB.innerHTML = htmlB;
+        }
+
+        // ================= 全局導航圖 (Minimap) 邏輯 =================
+        function renderMinimap() {
+            if (totalLinesCount === 0 || diffLines.length === 0) return;
+            let html = '';
+            let segments = [];
+            let currentSeg = null;
+            
+            for (let addr of diffLines) {
+                let lineIdx = addr / 16;
+                if (!currentSeg) { currentSeg = { start: lineIdx, end: lineIdx, count: 1 }; } 
+                else if (lineIdx === currentSeg.end + 1) { currentSeg.end = lineIdx; currentSeg.count++; } 
+                else { segments.push(currentSeg); currentSeg = { start: lineIdx, end: lineIdx, count: 1 }; }
+            }
+            if (currentSeg) segments.push(currentSeg);
+            
+            segments.forEach(seg => {
+                let topPercent = (seg.start / totalLinesCount) * 100;
+                let heightPercent = ((seg.end - seg.start + 1) / totalLinesCount) * 100;
+                let thicknessClass = 'marker-thin';
+                if (seg.count >= 6) thicknessClass = 'marker-massive';
+                else if (seg.count >= 2) thicknessClass = 'marker-thick';
+                
+                const hexAddr = (seg.start * 16).toString(16).padStart(8,'0').toUpperCase();
+                html += `<div class="minimap-marker ${thicknessClass}" style="top: ${topPercent}%; height: max(3px, ${heightPercent}%);" onclick="scrollToAddr(${seg.start * 16}); event.stopPropagation();" title="跳轉至位址 0x${hexAddr}"></div>`;
+            });
+            document.getElementById('minimapContent').innerHTML = html;
+        }
+
+        function updateMinimapViewport() {
+            const viewport = document.getElementById('minimapViewport');
+            if (paneA.scrollHeight === 0) return;
+            const scrollPercent = paneA.scrollTop / paneA.scrollHeight;
+            const viewPercent = paneA.clientHeight / paneA.scrollHeight;
+            viewport.style.top = `${scrollPercent * 100}%`;
+            viewport.style.height = `${viewPercent * 100}%`;
+        }
+
+        window.onMinimapClick = function(e) {
+            const rect = document.getElementById('minimapContainer').getBoundingClientRect();
+            const percent = (e.clientY - rect.top) / rect.height;
+            const targetLineIdx = Math.floor(percent * totalLinesCount);
+            scrollToAddr(targetLineIdx * 16);
+        };
+
+        window.scrollToAddr = function(addr) {
+            const targetLineIdx = Math.floor(addr / 16);
+            // 將目標行置中
+            const targetScrollTop = (targetLineIdx * ROW_HEIGHT) - (paneA.clientHeight / 2) + (ROW_HEIGHT / 2);
+            paneA.scrollTop = targetScrollTop;
+            
+            // 瞬間更新畫面並賦予 Line Focus 背景色
+            focusedLineAddr = addr;
+            updateVirtualViewport();
+            
+            // 1秒後移除背景色提示
+            setTimeout(() => { focusedLineAddr = -1; updateVirtualViewport(); }, 1000);
+        };
+
+        // ================= 介面控制與導航 =================
+        window.updateViewSettings = function() {
+            const hMode = document.getElementById('selHighlightMode').value;
+            const container = document.getElementById('diffAppContainer');
+            container.className = `flex-1 flex overflow-hidden bg-slate-950 relative mode-${hMode}`;
+            navigateDiff(0); 
+        };
+
+        window.focusAndTranslate = function(targetOffset) {
+            document.getElementById('selNavMode').value = 'byte'; 
+            currentByteIdx = diffBytes.findIndex(d => d.offset === targetOffset);
+            navigateDiff(0);
+        };
+
+        window.navigateDiff = function(direction) {
+            const navMode = document.getElementById('selNavMode').value;
+            
+            focusedByteOffset = -1;
+            focusedLineAddr = -1;
+
+            if (navMode === 'byte') {
+                if (diffBytes.length === 0) { updateCounter(0, 0); return; }
+                if (direction !== 0 || currentByteIdx === -1) {
+                    currentByteIdx += direction;
+                    if (currentByteIdx < 0) currentByteIdx = diffBytes.length - 1;
+                    if (currentByteIdx >= diffBytes.length) currentByteIdx = 0;
+                }
+                const target = diffBytes[currentByteIdx];
+                focusedByteOffset = target.offset;
+                
+                // 滾動並置中該 Byte 所在的行
+                const targetScrollTop = (Math.floor(target.offset / 16) * ROW_HEIGHT) - (paneA.clientHeight / 2);
+                paneA.scrollTop = targetScrollTop;
+                
+                translateText(target.offset, target.valA, target.valB);
+                updateCounter(currentByteIdx + 1, diffBytes.length);
+                
+            } else if (navMode === 'line') {
+                if (diffLines.length === 0) { updateCounter(0, 0); return; }
+                if (direction !== 0 || currentLineIdx === -1) {
+                    currentLineIdx += direction;
+                    if (currentLineIdx < 0) currentLineIdx = diffLines.length - 1;
+                    if (currentLineIdx >= diffLines.length) currentLineIdx = 0;
+                }
+                const targetLineAddr = diffLines[currentLineIdx];
+                focusedLineAddr = targetLineAddr;
+                
+                const targetScrollTop = (Math.floor(targetLineAddr / 16) * ROW_HEIGHT) - (paneA.clientHeight / 2);
+                paneA.scrollTop = targetScrollTop;
+                
+                const firstByteInLine = diffBytes.find(d => d.lineAddr === targetLineAddr);
+                if (firstByteInLine) translateText(firstByteInLine.offset, firstByteInLine.valA, firstByteInLine.valB, true);
+                updateCounter(currentLineIdx + 1, diffLines.length);
+            }
+            
+            // 強制觸發一次虛擬渲染以套用高亮樣式
+            updateVirtualViewport();
+        };
+
+        function updateCounter(current, total) {
+            document.getElementById('diffCounterText').innerText = `${current} / ${total}`;
+            const disabled = total === 0;
+            document.getElementById('btnPrev').disabled = disabled;
+            document.getElementById('btnNext').disabled = disabled;
+            if (disabled) document.getElementById('translateLabel').innerHTML = `<span class="text-green-500 text-lg">✅</span> <span>兩個檔案完全相同。</span>`;
+        }
+
+        function translateText(offset, valA, valB, isLineMode = false) {
+            const addrHex = offset.toString(16).toUpperCase().padStart(8, '0');
+            const hexA = (valA || 0).toString(16).padStart(2, '0').toUpperCase();
+            const hexB = (valB || 0).toString(16).padStart(2, '0').toUpperCase();
+            const binA = (valA || 0).toString(2).padStart(8, '0');
+            const binB = (valB || 0).toString(2).padStart(8, '0');
+            const prefix = isLineMode ? `本行首個差異在位址 ` : `位址 `;
+            document.getElementById('translateLabel').innerHTML = `<span class="text-amber-500 text-lg">💡</span> <span>${prefix} <b class="tracking-wider">0x${addrHex}</b> ： Base 為 <b class="text-blue-400">0x${hexA}</b> <span class="text-slate-500">(${binA})</span> ➡️ Target 被修改為 <b class="text-emerald-400">0x${hexB}</b> <span class="text-slate-500">(${binB})</span></span>`;
+        }
+
+        window.resetApp = function() {
+            bufferA = null; bufferB = null; diffBytes = []; diffLines = [];
+            currentByteIdx = -1; currentLineIdx = -1; focusedByteOffset = -1; focusedLineAddr = -1;
+            fileMaxLength = 0; totalLinesCount = 0;
+            
+            document.getElementById('fileA').value = ''; document.getElementById('fileB').value = '';
+            document.getElementById('labelA').innerText = '將 檔案 A 拖曳至此處'; document.getElementById('labelB').innerText = '將 檔案 B 拖曳至此處';
+            document.getElementById('chunkA').innerHTML = ''; document.getElementById('chunkB').innerHTML = '';
+            document.getElementById('spaceA').style.height = '0px'; document.getElementById('spaceB').style.height = '0px';
+            document.getElementById('minimapContent').innerHTML = '';
+            
+            document.getElementById('statusText').innerText = 'Status: Waiting for files...';
+            document.getElementById('translateLabel').innerHTML = `<span class="text-amber-500 text-lg">💡</span> <span>操作提示：請載入兩個檔案。中間的導航條可觀察全局差異並點擊跳轉。</span>`;
+            document.getElementById('toolbarContainer').classList.add('hidden');
+            document.getElementById('dragZoneContainer').classList.remove('hidden');
+            document.getElementById('minimapContainer').classList.add('hidden');
+        };
+    </script>
+</body>
+</html>
